@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -263,9 +264,10 @@ func (c *Client) ListUserDevices() ([]UserDevice, error) {
 		return nil, err
 	}
 
+	jsContent := string(jsPayload)
 	s := js.Script{
 		Name:    "userdevinfo.asp.js",
-		Content: string(jsPayload),
+		Content: jsContent,
 	}
 
 	var devices []*UserDevice
@@ -326,4 +328,128 @@ func (c *Client) GetResourceUsage() (*ResourceUsage, error) {
 	}
 
 	return &usage, nil
+}
+func (c Client) getPageEmbeddedHWToken(page string) (*string, error) {
+
+	_, err := c.GetHardwareToken()
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+page, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Referer", c.baseURL)
+
+	resp, err := c.h.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	all, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	htmlSrc := string(all)
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlSrc))
+	if err != nil {
+		return nil, err
+	}
+	// <input type="hidden" name="onttoken" id="hwonttoken" value="30e8637001339c6fbf119119c41a8e065a9d32304ce74f4f">
+	hwToken, exists := doc.Find("input#hwonttoken").First().Attr("value")
+	if !exists {
+		return nil, errors.New("hwonttoken not found")
+	}
+	return &hwToken, nil
+}
+
+func (c *Client) GetAllStaticDnsHosts() ([]StaticDnsHost, error) {
+	c.m.Lock()
+	defer c.m.Unlock()
+	return c.getAllStaticDNSHosts()
+
+}
+func (c *Client) getAllStaticDNSHosts() ([]StaticDnsHost, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/html/bbsp/common/dnshostslist.asp", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-GB,en-US;q=0.9,en;q=0.8")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Referer", c.baseURL+"/html/bbsp/dnsconfiguration/dnshosts.asp")
+	req.Header.Set("User-Agent", c.userAgent)
+	resp, err := c.h.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	all, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// Regex pattern to match DnsHostsItemClass instances
+	pattern := `new\s+DnsHostsItemClass\("([^"]+)","([^"]+)","([^"]+)"\)`
+	re := regexp.MustCompile(pattern)
+	matches := re.FindAllStringSubmatch(string(all), -1)
+
+	if matches == nil {
+		return nil, errors.New("no DNS hosts found")
+	}
+
+	var dnsHostsList []StaticDnsHost
+	for _, match := range matches {
+		// Unescape the escaped characters
+		domainName := strings.ReplaceAll(match[3], `\x2e`, ".")
+		ipAddress := strings.ReplaceAll(match[2], `\x2e`, ".")
+		host := StaticDnsHost{
+			DomainName: domainName,
+			IPAddress:  ipAddress,
+		}
+		dnsHostsList = append(dnsHostsList, host)
+	}
+
+	return dnsHostsList, nil
+}
+func (c *Client) dnsHostOperation(operation string, host StaticDnsHost) error {
+	c.m.Lock()
+	defer c.m.Unlock()
+	hwToken, err := c.getPageEmbeddedHWToken("/html/bbsp/dnsconfiguration/dnshosts.asp")
+	if err != nil {
+		return err
+	}
+	data := url.Values{}
+	data.Set("x.IPAddress", host.IPAddress)
+	data.Set("x.DomainName", host.DomainName)
+	data.Set("x.X_HW_Token", *hwToken)
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+operation, strings.NewReader(data.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.Set("Referer", c.baseURL+"/html/bbsp/dnsconfiguration/dnshosts.asp")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Origin", c.baseURL)
+	req.Header.Set("Accept-Language", "en-GB,en-US;q=0.9,en;q=0.8")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Accept", "*/*")
+
+	if err != nil {
+		return err
+	}
+	resp, err := c.h.Do(req)
+	if err != nil {
+		return err
+	}
+	// Very weird, but for some reason the router returns 404 when the host is added successfully
+	if resp.StatusCode != http.StatusNotFound {
+		return errors.New("failed to add DNS host (Expected status 404, but got " + strconv.Itoa(resp.StatusCode) + ")")
+	}
+	return nil
+}
+
+func (c *Client) AddDnsHost(host StaticDnsHost) error {
+	return c.dnsHostOperation("/add.cgi?x=InternetGatewayDevice.X_HW_DNS.HOSTS&RequestFile=html/ipv6/not_find_file.asp", host)
+}
+
+func (c *Client) SetDnsHost(host StaticDnsHost, index int) error {
+	return c.dnsHostOperation("/set.cgi?x=InternetGatewayDevice.X_HW_DNS.HOSTS."+strconv.Itoa(index+1)+"&RequestFile=html/ipv6/not_find_file.asp", host)
 }
