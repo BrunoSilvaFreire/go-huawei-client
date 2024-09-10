@@ -8,3 +8,4 @@ Unofficial client library to get data from Huawei router.
 
 - Login and Logout
 - List User Devices
+- Get Resource Usage
