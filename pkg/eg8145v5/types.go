@@ -20,6 +20,11 @@ type UserDevice struct {
 	LeaseTimeRemaining      string
 }
 
+type StaticDnsHost struct {
+	DomainName string
+	IPAddress  string
+}
+
 func (d *UserDevice) Online() bool {
 	return strings.EqualFold(d.DevStatus, "online")
 }
